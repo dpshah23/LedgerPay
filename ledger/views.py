@@ -50,7 +50,7 @@ def payments(request):
         return JsonResponse({"error": "payment creation failed"}, status=502)
     except DatabaseError:
         logger.exception("creating payment")
-        return JsonResponse({"error": "payment creation failed"}, status=502)
+        return JsonResponse({"error": "payment creation failed"}, status=503)
 
     return JsonResponse(payment_json(payment), status=201)
 
@@ -105,7 +105,7 @@ def stripe_webhook(request):
         return JsonResponse({"error": "ledger is unbalanced"}, status=500)
     except DatabaseError:
         logger.exception("processing Stripe webhook")
-        return JsonResponse({"error": "webhook processing failed"}, status=500)
+        return JsonResponse({"error": "webhook processing failed"}, status=503)
 
     return JsonResponse({"status": "ok"})
 

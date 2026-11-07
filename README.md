@@ -49,13 +49,17 @@ Payment amounts are integer values in the smallest currency unit.
   primary key. The event, payment status update, and successful-payment ledger
   entries are committed in one transaction.
 - If Stripe succeeds but the server crashes before saving the Stripe
-  PaymentIntent ID, the payment remains pending. A later request with the same
-  idempotency key returns that stored payment without another Stripe call. This
-  implementation does not include a reconciliation job for that failure window.
+  PaymentIntent ID, the database transaction rolls back. A later request with
+  the same idempotency key sends the same key to Stripe, which returns the
+  existing PaymentIntent without creating a second one.
+- The Stripe request runs inside the database transaction. This keeps failures
+  atomic and holds a database connection while Stripe responds; that tradeoff
+  is acceptable for this small service.
 - Out-of-order webhooks for unknown payment intents roll back the event insert.
   Stripe can then retry the event after the payment row exists.
 
 ## Not handled
 
-Refunds, disputes, multi-currency accounting, and authentication are not
-implemented.
+Refunds, disputes, multi-currency accounting, authentication, and ledger
+pagination are not implemented. Webhooks also do not compare the Stripe
+PaymentIntent amount with the stored payment amount.

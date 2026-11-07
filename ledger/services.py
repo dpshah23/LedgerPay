@@ -33,20 +33,17 @@ def create_payment(amount, currency, idempotency_key, gateway=None):
                 currency=currency,
                 idempotency_key=idempotency_key,
             )
+            gateway = gateway or StripeGateway()
+            payment.stripe_payment_intent_id = gateway.create_payment_intent(
+                amount, currency, idempotency_key
+            )
+            payment.save(update_fields=["stripe_payment_intent_id"])
     except IntegrityError:
         payment = Payment.objects.get(idempotency_key=idempotency_key)
         if payment.amount != amount or payment.currency != currency:
             raise InvalidPayment(
                 "idempotency key was already used with different payment details"
             )
-        return payment
-
-    gateway = gateway or StripeGateway()
-    intent_id = gateway.create_payment_intent(amount, currency, idempotency_key)
-    Payment.objects.filter(pk=payment.pk).update(
-        stripe_payment_intent_id=intent_id
-    )
-    payment.stripe_payment_intent_id = intent_id
     return payment
 
 
@@ -85,15 +82,11 @@ def process_webhook(event):
         except Payment.DoesNotExist as exc:
             raise WebhookPaymentNotFound from exc
 
-        status = (
-            Payment.Status.SUCCEEDED
-            if event_type == "payment_intent.succeeded"
-            else Payment.Status.FAILED
-        )
-        payment.status = status
-        payment.save(update_fields=["status"])
-
         if event_type == "payment_intent.succeeded":
+            if payment.status == Payment.Status.SUCCEEDED:
+                return
+            payment.status = Payment.Status.SUCCEEDED
+            payment.save(update_fields=["status"])
             LedgerEntry.objects.bulk_create(
                 [
                     LedgerEntry(
@@ -111,25 +104,13 @@ def process_webhook(event):
                 ]
             )
             check_payment_balance(payment)
+        elif payment.status != Payment.Status.SUCCEEDED:
+            payment.status = Payment.Status.FAILED
+            payment.save(update_fields=["status"])
 
 
 def check_payment_balance(payment):
-    totals = LedgerEntry.objects.filter(payment=payment).aggregate(
-        debits=Sum(
-            Case(
-                When(direction=LedgerEntry.Direction.DEBIT, then="amount"),
-                default=0,
-                output_field=IntegerField(),
-            )
-        ),
-        credits=Sum(
-            Case(
-                When(direction=LedgerEntry.Direction.CREDIT, then="amount"),
-                default=0,
-                output_field=IntegerField(),
-            )
-        ),
-    )
+    totals = _ledger_totals(LedgerEntry.objects.filter(payment=payment))
     debits = totals["debits"] or 0
     credits = totals["credits"] or 0
     if debits != credits:
@@ -140,7 +121,13 @@ def check_payment_balance(payment):
 
 def get_ledger(account):
     entries = LedgerEntry.objects.filter(account=account).order_by("created_at", "id")
-    totals = entries.aggregate(
+    totals = _ledger_totals(entries)
+    balance = (totals["debits"] or 0) - (totals["credits"] or 0)
+    return entries, balance
+
+
+def _ledger_totals(entries):
+    return entries.aggregate(
         debits=Sum(
             Case(
                 When(direction=LedgerEntry.Direction.DEBIT, then="amount"),
@@ -156,8 +143,6 @@ def get_ledger(account):
             )
         ),
     )
-    balance = (totals["debits"] or 0) - (totals["credits"] or 0)
-    return entries, balance
 
 
 def parse_payment_body(body):
@@ -174,20 +159,17 @@ def parse_payment_body(body):
 def payment_details(data):
     amount = data.get("amount")
     currency = data.get("currency")
-    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
-        raise InvalidPayment("amount must be a positive integer")
-    if (
-        not isinstance(currency, str)
-        or len(currency) != 3
-        or not currency.isalpha()
-    ):
-        raise InvalidPayment("currency must be a three-letter code")
+    _validate_details(amount, currency)
     return amount, currency.lower()
 
 
 def _validate_payment(amount, currency, idempotency_key):
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise InvalidPayment("Idempotency-Key header is required")
+    _validate_details(amount, currency)
+
+
+def _validate_details(amount, currency):
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise InvalidPayment("amount must be a positive integer")
     if (
