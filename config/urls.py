@@ -6,4 +6,5 @@ urlpatterns = [
     path("healthz", views.healthz, name="healthz"),
     path("payments", views.payments, name="payments"),
     path("payments/<uuid:payment_id>", views.payment_detail, name="payment_detail"),
+    path("webhooks/stripe", views.stripe_webhook, name="stripe_webhook"),
 ]

@@ -1,17 +1,21 @@
 import logging
 
 import stripe
+from django.conf import settings
 from django.db import connection
 from django.db.utils import DatabaseError
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 
 from .services import (
     InvalidPayment,
     PaymentNotFound,
+    WebhookPaymentNotFound,
     create_payment,
     get_payment,
     parse_payment_body,
     payment_details,
+    process_webhook,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,3 +73,33 @@ def payment_json(payment):
         "stripe_payment_intent_id": payment.stripe_payment_intent_id,
         "created_at": payment.created_at.isoformat(),
     }
+
+
+@csrf_exempt
+def stripe_webhook(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    signature = request.headers.get("Stripe-Signature")
+    if not signature:
+        return JsonResponse({"error": "missing Stripe-Signature"}, status=400)
+
+    try:
+        event = stripe.Webhook.construct_event(
+            request.body,
+            signature,
+            settings.STRIPE_WEBHOOK_SECRET,
+        )
+    except (ValueError, stripe.SignatureVerificationError):
+        return JsonResponse({"error": "invalid webhook signature"}, status=400)
+
+    try:
+        process_webhook(event)
+    except WebhookPaymentNotFound:
+        logger.error("webhook references unknown payment intent")
+        return JsonResponse({"error": "unknown payment intent"}, status=500)
+    except DatabaseError:
+        logger.exception("processing Stripe webhook")
+        return JsonResponse({"error": "webhook processing failed"}, status=500)
+
+    return JsonResponse({"status": "ok"})

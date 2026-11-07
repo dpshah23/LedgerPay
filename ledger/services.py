@@ -3,7 +3,7 @@ import json
 from django.db import IntegrityError, transaction
 
 from .gateway import StripeGateway
-from .models import Payment
+from .models import Payment, WebhookEvent
 
 
 class InvalidPayment(ValueError):
@@ -11,6 +11,10 @@ class InvalidPayment(ValueError):
 
 
 class PaymentNotFound(LookupError):
+    pass
+
+
+class WebhookPaymentNotFound(LookupError):
     pass
 
 
@@ -46,6 +50,43 @@ def get_payment(payment_id):
         return Payment.objects.get(pk=payment_id)
     except Payment.DoesNotExist as exc:
         raise PaymentNotFound from exc
+
+
+def process_webhook(event):
+    event_type = event["type"]
+    event_id = event["id"]
+
+    with transaction.atomic():
+        try:
+            with transaction.atomic():
+                WebhookEvent.objects.create(
+                    stripe_event_id=event_id,
+                    type=event_type,
+                )
+        except IntegrityError:
+            return
+
+        if event_type not in (
+            "payment_intent.succeeded",
+            "payment_intent.payment_failed",
+        ):
+            return
+
+        intent = event["data"]["object"]
+        try:
+            payment = Payment.objects.select_for_update().get(
+                stripe_payment_intent_id=intent["id"]
+            )
+        except Payment.DoesNotExist as exc:
+            raise WebhookPaymentNotFound from exc
+
+        status = (
+            Payment.Status.SUCCEEDED
+            if event_type == "payment_intent.succeeded"
+            else Payment.Status.FAILED
+        )
+        payment.status = status
+        payment.save(update_fields=["status"])
 
 
 def parse_payment_body(body):
