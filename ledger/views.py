@@ -9,6 +9,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .services import (
     InvalidPayment,
+    LedgerImbalance,
     PaymentNotFound,
     WebhookPaymentNotFound,
     create_payment,
@@ -16,6 +17,7 @@ from .services import (
     parse_payment_body,
     payment_details,
     process_webhook,
+    get_ledger,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,8 +100,35 @@ def stripe_webhook(request):
     except WebhookPaymentNotFound:
         logger.error("webhook references unknown payment intent")
         return JsonResponse({"error": "unknown payment intent"}, status=500)
+    except LedgerImbalance:
+        logger.exception("webhook produced an unbalanced ledger")
+        return JsonResponse({"error": "ledger is unbalanced"}, status=500)
     except DatabaseError:
         logger.exception("processing Stripe webhook")
         return JsonResponse({"error": "webhook processing failed"}, status=500)
 
     return JsonResponse({"status": "ok"})
+
+
+def ledger(request, account):
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    entries, balance = get_ledger(account)
+    return JsonResponse(
+        {
+            "account": account,
+            "balance": balance,
+            "entries": [
+                {
+                    "id": entry.id,
+                    "payment_id": str(entry.payment_id),
+                    "account": entry.account,
+                    "direction": entry.direction,
+                    "amount": entry.amount,
+                    "created_at": entry.created_at.isoformat(),
+                }
+                for entry in entries
+            ],
+        }
+    )

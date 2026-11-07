@@ -1,9 +1,10 @@
 import json
 
 from django.db import IntegrityError, transaction
+from django.db.models import Case, IntegerField, Sum, When
 
 from .gateway import StripeGateway
-from .models import Payment, WebhookEvent
+from .models import LedgerEntry, Payment, WebhookEvent
 
 
 class InvalidPayment(ValueError):
@@ -15,6 +16,10 @@ class PaymentNotFound(LookupError):
 
 
 class WebhookPaymentNotFound(LookupError):
+    pass
+
+
+class LedgerImbalance(RuntimeError):
     pass
 
 
@@ -87,6 +92,72 @@ def process_webhook(event):
         )
         payment.status = status
         payment.save(update_fields=["status"])
+
+        if event_type == "payment_intent.succeeded":
+            LedgerEntry.objects.bulk_create(
+                [
+                    LedgerEntry(
+                        payment=payment,
+                        account="stripe_clearing",
+                        direction=LedgerEntry.Direction.DEBIT,
+                        amount=payment.amount,
+                    ),
+                    LedgerEntry(
+                        payment=payment,
+                        account="revenue",
+                        direction=LedgerEntry.Direction.CREDIT,
+                        amount=payment.amount,
+                    ),
+                ]
+            )
+            check_payment_balance(payment)
+
+
+def check_payment_balance(payment):
+    totals = LedgerEntry.objects.filter(payment=payment).aggregate(
+        debits=Sum(
+            Case(
+                When(direction=LedgerEntry.Direction.DEBIT, then="amount"),
+                default=0,
+                output_field=IntegerField(),
+            )
+        ),
+        credits=Sum(
+            Case(
+                When(direction=LedgerEntry.Direction.CREDIT, then="amount"),
+                default=0,
+                output_field=IntegerField(),
+            )
+        ),
+    )
+    debits = totals["debits"] or 0
+    credits = totals["credits"] or 0
+    if debits != credits:
+        raise LedgerImbalance(
+            f"payment {payment.pk} has {debits} in debits and {credits} in credits"
+        )
+
+
+def get_ledger(account):
+    entries = LedgerEntry.objects.filter(account=account).order_by("created_at", "id")
+    totals = entries.aggregate(
+        debits=Sum(
+            Case(
+                When(direction=LedgerEntry.Direction.DEBIT, then="amount"),
+                default=0,
+                output_field=IntegerField(),
+            )
+        ),
+        credits=Sum(
+            Case(
+                When(direction=LedgerEntry.Direction.CREDIT, then="amount"),
+                default=0,
+                output_field=IntegerField(),
+            )
+        ),
+    )
+    balance = (totals["debits"] or 0) - (totals["credits"] or 0)
+    return entries, balance
 
 
 def parse_payment_body(body):
