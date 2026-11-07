@@ -26,7 +26,10 @@ ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
 database_url = urlparse(
-    os.getenv("DATABASE_URL", "postgres://ledgerpay:ledgerpay@localhost:5432/ledgerpay")
+    os.getenv(
+        "TEST_DATABASE_URL",
+        os.getenv("DATABASE_URL", "postgres://ledgerpay:ledgerpay@localhost:5432/ledgerpay"),
+    )
 )
 DATABASES = {
     "default": {
